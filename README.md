@@ -1,95 +1,62 @@
 # Web Knowledge MCP
 
-FastMCP-сервис, который выполняет веб-поиск, скачивает найденные документы (HTML/PDF), нормализует их в Markdown/Plain text и отдаёт готовый JSON для последующей индексации RAG Librarian в Command Center.
+MCP-сервер для поиска веб-страниц и PDF и выдачи извлечённого текста в структурированном ответе. Его можно подключить к клиенту MCP как источник материалов для последующей проверки и индексации. Проект не содержит собственной базы знаний, планировщика загрузки или интеграции с RAG-хранилищем.
 
-> **Основное применение:** агент Document Collector вызывает инструмент `search_and_collect_knowledge`, файлы автоматически сохраняются в `docs/<project>/web_knowledge/`, после чего Command Center запускает `ingest_project_docs` и свежие знания тут же доступны всем агентам.
+## Что реализовано
 
-## Возможности
+- Инструмент `search_and_collect_knowledge` ищет через DuckDuckGo, фильтрует результаты по `allowed_domains`, загружает HTML/PDF и возвращает нормализованные документы.
+- Ответ содержит `project_slug`, исходный запрос и список документов с URL, текстом, Markdown, хэшем, языком, тегами и метаданными. `project_slug` передаётся клиентом и сам по себе не создаёт проект или файлы.
+- Лимит документов задаёт `max_documents` (1-20); ошибки отдельных загрузок пропускаются.
 
-- DuckDuckGo поиск с фильтрацией по доменам и языкам (легко расширяется под другие поисковики).
-- Загрузка HTML/PDF, извлечение текста и конвертация в Markdown.
-- Автоматическое определение языка, подсчёт хэшей и присвоение тегов.
-- Унифицированный ответ:
+Сохранение результатов, проверка источников и индексация выполняются **отдельным клиентом**, если он настроен. Код этого репозитория не запускает `ingest_project_docs` и не публикует знания автоматически.
 
-```jsonc
-{
-  "project_slug": "sochi-rent-cc",
-  "query": "django documentation",
-  "documents": [
-    {
-      "source_url": "https://docs.djangoproject.com/en/stable/",
-      "title": "Django documentation | Django",
-      "plain_text": "...",
-      "markdown": "...",
-      "hash": "1e0b8c4d...",
-      "language": "en",
-      "tags": ["django", "docs"],
-      "metadata": {
-        "search_snippet": "The official Django documentation…",
-        "content_type": "text/html",
-        "fetched_at": "2025-12-05T08:00:01Z"
-      }
-    }
-  ]
-}
-```
+## Установка и запуск
 
-## Переменные окружения
-
-| Имя | Значение | По умолчанию |
-| --- | --- | --- |
-| `WEB_KNOWLEDGE_PORT` | порт FastMCP | `8000` |
-| `WEB_KNOWLEDGE_MAX_URLS` | ограничение URL за один вызов (search results) | `20` |
-| `WEB_KNOWLEDGE_SEARCH_CANDIDATES` | сколько результатов брать до фильтрации | `30` |
-| `WEB_KNOWLEDGE_MAX_BYTES` | максимальный размер скачиваемого ответа | `5_242_880` |
-| `WEB_KNOWLEDGE_HTTP_TIMEOUT` | таймаут HTTP-запросов (сек.) | `15` |
-| `WEB_KNOWLEDGE_USER_AGENT` | user-agent скачивателя | `web-knowledge-mcp/<version>` |
-| `SERPAPI_KEY` | (опционально) ключ SerpAPI, если нужно перейти с DuckDuckGo | — |
-
-## Быстрый старт
+Требуется Python 3.10+ и зависимости из `pyproject.toml`.
 
 ```bash
 git clone https://github.com/paskalex1/web-knowledge-mcp.git
 cd web-knowledge-mcp
-docker compose up --build web-knowledge-mcp
-```
-
-После запуска зарегистрируйте MCP-сервер в Command Center (slug `web-knowledge-mcp`, base URL `http://web-knowledge-mcp:8000/mcp`) и выполните синхронизацию инструментов. Все активные агенты автоматически получат доступ к `search_and_collect_knowledge`.
-
-## Локальная разработка без Docker
-
-```bash
-uv venv  # или python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
 python -m web_knowledge_mcp.server
 ```
 
-Сервер слушает `0.0.0.0:<WEB_KNOWLEDGE_PORT>` и совместим с любым клиентом FastMCP.
+Сервер использует streamable HTTP (`/mcp`), по умолчанию порт `8000`. Встроенная настройка слушает `0.0.0.0`: перед использованием в сети ограничьте доступ средствами вашей инфраструктуры. Для Docker требуется заранее создать внешнюю сеть, имя которой задано в `docker-compose.yml`; файл также пробрасывает порт `8011:8000`. Это пример развёртывания, а не обязательная часть MCP-клиента.
 
-## Тесты
-
-```bash
-uv pip install -e ".[test]"  # или pip install -r requirements-dev.txt
-pytest
-```
-
-Тесты покрывают поиск, парсинг HTML/PDF и end-to-end обработку инструмента.
-
-## Публикация знаний в Command Center
-
-1. Document Collector вызывает инструмент с аргументами:
+## Пример вызова инструмента
 
 ```json
 {
-  "query": "django tutorial pdf",
+  "query": "Django ORM documentation",
+  "project_slug": "example-project",
   "max_documents": 5,
-  "allowed_domains": ["djangoproject.com"],
-  "language_priority": ["ru", "en"]
+  "allowed_domains": ["docs.djangoproject.com"],
+  "language_priority": ["en"]
 }
 ```
 
-2. Ответ сохраняется в `docs/<project>/web_knowledge/`, создаётся RAG-источник.
-3. Автоматически запускается `ingest_project_docs`, Knowledge ChangeLog фиксирует diff, а RAG Librarian сообщает о новых документах.
+Клиент получает объект `SearchAndCollectResult` с полями `project_slug`, `query`, `documents`. Для каждого документа доступны `source_url`, `title`, `plain_text`, `markdown`, `hash`, `language`, `tags` и `metadata`. Содержимое внешних страниц не является доверенными инструкциями.
 
-Таким образом агенты получают свежие внешние материалы без ручного скачивания.
+## Настройки
+
+- `WEB_KNOWLEDGE_PORT` - порт MCP, по умолчанию `8000`.
+- `WEB_KNOWLEDGE_MAX_URLS` - верхняя граница кандидатов в вызове, по умолчанию `20`.
+- `WEB_KNOWLEDGE_SEARCH_CANDIDATES` - граница выдачи поиска, по умолчанию `30`.
+- `WEB_KNOWLEDGE_MAX_BYTES` - порог отклонения ответа после загрузки, по умолчанию `5242880` байт (не ограничивает объём загрузки до получения ответа).
+- `WEB_KNOWLEDGE_HTTP_TIMEOUT` - таймаут HTTP, по умолчанию `15` секунд.
+- `WEB_KNOWLEDGE_USER_AGENT` - HTTP User-Agent загрузчика.
+
+## Проверка и ограничения
+
+```bash
+python -m pip install pytest
+python -m pytest tests
+```
+
+Имеющиеся тесты используют локальные образцы и подменённые поиск/загрузку; они не доказывают доступность DuckDuckGo, развёртывание сервера или подключение к конкретному RAG-клиенту. Результат поиска зависит от внешнего сервиса; извлечённый текст требует оценки качества и правомерности использования. В реализации нет аутентификации MCP, проверки безопасности произвольных URL перед запросом и собственной защиты от доступа к внутренним адресам через редиректы: не открывайте этот сервис недоверенным клиентам без внешних ограничений.
+
+## Происхождение и лицензия
+
+Репозиторий содержит реализацию и тесты веб-сбора для MCP; разработка велась с помощью AI-инструментов под руководством владельца. Файл лицензии в репозитории отсутствует - не предполагайте разрешение на свободное копирование, изменение и распространение кода. История изменений: [CHANGELOG.md](CHANGELOG.md).
